@@ -1,0 +1,43 @@
+{
+  "_comment": "Diff file paths are matched against each family's globs (first-match wins, but a file may wake multiple families). The generalist family ALWAYS wakes when a changed/deleted file matches no family, or when routing is uncertain. Orchestrator dedups overlapping findings post-hoc.",
+  "families": {
+    "security": {
+      "globs": ["**/api*/**", "**/auth*/**", "**/*.env*", "middleware.ts", "**/*supabase*", "**/*firebase*", "lib/api-key.*", "**/csp*"],
+      "content_signals": ["supabaseAdmin", "service_role", "verifyIdToken", ".or(", "localStorage", "dangerouslySetInnerHTML", "createClient"]
+    },
+    "database": {
+      "globs": ["**/ingest*/**", "**/sync*/**", "**/*.sql", "api-handlers/**", "**/_lib/**", "**/bulk-operations*"],
+      "content_signals": [".from(", ".insert(", ".update(", ".upsert(", ".delete(", "count: 'exact'", ".limit("]
+    },
+    "search": {
+      "globs": ["**/search/**", "**/*autocomplete*", "**/*suggest*", "**/job-autocomplete*"],
+      "content_signals": [".textSearch(", ".ilike(", ".or(", "diversify", "rank"]
+    },
+    "frontend-seo-aeo": {
+      "globs": ["app/**", "components/**", "src/components/**", "**/*.tsx", "next.config.*", "**/robots*", "**/sitemap*", "**/csp*", "src/lib/*Service.ts"],
+      "content_signals": ["canonical", "noindex", "JsonLd", "useEffect", "select('*')", "metadata"]
+    },
+    "middleware-scalability": {
+      "globs": ["middleware.ts", "**/middleware/**", "**/rate-limit*", "vercel.json", "lib/db*", "**/*pool*", "**/cache*"],
+      "content_signals": ["new Map(", "Cache-Control", "rateLimit", "pool", "Supavisor"]
+    },
+    "cron-reliability": {
+      "globs": ["**/selfheal/**", "**/self-healing/**", "vercel.json", "**/workers/**", "**/cron*", "**/runLog*"],
+      "content_signals": ["cron", "CRON_SECRET", "is_active", "serviceProbe", "schedule"]
+    },
+    "generalist": {
+      "globs": ["**/*"],
+      "is_fallback": true,
+      "_comment": "Wakes on: unclaimed files, code deletions, or any routing uncertainty. Recall-first; no static checklist — pure open-ended hunt."
+    }
+  },
+  "run_modes": {
+    "fast": {"roles": ["checker", "cynic"], "researcher": "on-demand-only", "default_for": "/Joblet-review"},
+    "deep": {"roles": ["checker", "cynic", "researcher"], "researcher": "always"}
+  },
+  "limits": {
+    "per_run_wallclock_seconds": 360,
+    "on_timeout": "drop finding to needs-human, continue, note visibly in report",
+    "max_parallel_families": 6
+  }
+}

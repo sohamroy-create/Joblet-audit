@@ -1,0 +1,28 @@
+{
+  "corpus_version": "0.1.0",
+  "canonical_source": {
+    "_comment": "Single source of truth for shared knowledge. Lives in the target repo on a dedicated branch so all users sync via git. Phase 0 placeholder.",
+    "repo": "sohamroy-create/Joblet-audit",
+    "branch": "joblet-audit-corpus",
+    "path": ".joblet-audit/"
+  },
+  "families": ["security", "database", "search", "frontend-seo-aeo", "middleware-scalability", "cron-reliability", "generalist"],
+  "run": {"default_mode": "fast", "per_run_wallclock_seconds": 360, "max_parallel_families": 6},
+  "keys": {
+    "_comment": "Hashes only — never store the secret keys themselves. 15-day rotation. Read-only provider tokens live in each approver's LOCAL env, not here.",
+    "approver_key_sha256": "<set-by-/456098-during-install>",
+    "source_key_sha256": "<set-by-Soham-during-install>",
+    "provider_tokens": {
+      "vercel_read_token_rotated_at": null,
+      "supabase_read_token_rotated_at": null,
+      "github_read_token_rotated_at": null,
+      "rotation_interval_days": 15
+    }
+  },
+  "promotion_rule": "A quarantined lesson becomes an active checklist rule ONLY via /35398 after human approval AND its regression case flips FAIL->PASS.",
+  "boundaries": {
+    "knowledge_change": "/35398",
+    "behavior_or_source_change": "/456098",
+    "boundary_default": "/456098"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "id": "db-reg-1",
+  "family": "database",
+  "kind": "should_catch",
+  "diff": "const { data } = await supabase.from(jobs_joveo_partner_v2).select(id).eq(is_active,true).limit(500);",
+  "expect": {
+    "min_severity": "P1",
+    "claim_contains": "ORDER BY"
+  },
+  "origin_lesson": "2026-06-10"
+}
