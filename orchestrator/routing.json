@@ -6,7 +6,8 @@
       "content_signals": ["supabaseAdmin", "service_role", "verifyIdToken", ".or(", "localStorage", "dangerouslySetInnerHTML", "createClient"]
     },
     "database": {
-      "globs": ["**/ingest*/**", "**/sync*/**", "**/*.sql", "api-handlers/**", "**/_lib/**", "**/bulk-operations*"],
+      "_globs_note": "use filename-anywhere globs (**/*ingest*) not folder-only (**/ingest*/**) — validated 2026-06-11 against joblet1.0: root-level ingest-*.js scripts exist and were being missed",
+      "globs": ["**/*ingest*", "**/*sync*", "**/*.sql", "api-handlers/**", "**/_lib/**", "**/*bulk*"],
       "content_signals": [".from(", ".insert(", ".update(", ".upsert(", ".delete(", "count: 'exact'", ".limit("]
     },
     "search": {
@@ -18,7 +19,7 @@
       "content_signals": ["canonical", "noindex", "JsonLd", "useEffect", "select('*')", "metadata"]
     },
     "middleware-scalability": {
-      "globs": ["middleware.ts", "**/middleware/**", "**/rate-limit*", "vercel.json", "lib/db*", "**/*pool*", "**/cache*"],
+      "globs": ["middleware.ts", "**/middleware/**", "**/rate-limit*", "vercel.json", "lib/db*", "**/*pool*", "**/*cache*"],
       "content_signals": ["new Map(", "Cache-Control", "rateLimit", "pool", "Supavisor"]
     },
     "cron-reliability": {
