@@ -1,24 +1,49 @@
 # Family: SECURITY & AUTH
 
-**Lens:** secrets, auth, authorization, injection, data exposure. **Roles:** checker, cynic, researcher, analyser (templates in `roles/`, substitute `{{FAMILY}}=security`).
+**Lens:** secrets, auth, authorization, injection, data exposure, XSS/XXE/CSRF/IDOR, token handling.
+**Roles:** checker, cynic, researcher, analyser (templates in `roles/`, substitute `{{FAMILY}}=security`). FAM token = `security`; finding ids `security-N`.
+**Scope split:** files live across `src/lib/` (supabase.ts, csp.ts, *Service.ts), ROOT `lib/` (api-key.ts, rate-limit.ts — `@/lib/*` maps to ROOT, NOT src), and `api-handlers/` (onboarding, user-profile, _lib/{postgrestQuote,verifyFirebaseToken,cors}.js). `@/*` catch-all → `./src/*`.
 
-**Glob triggers:** `**/api*/**`, `**/auth*/**`, `**/*.env*`, `middleware.ts`, `**/*supabase*`, `**/*firebase*`, `lib/api-key.*`, `**/csp*`
-**Content signals:** `supabaseAdmin`, `service_role`, `verifyIdToken`, `.or(`, `localStorage`, `dangerouslySetInnerHTML`, `createClient`
+## Wake triggers (glob OR content-signal; over-wake is safe)
 
-## Seed checklist (the coverage floor — grows via /35398)
-1. Hardcoded secret / JWT / service_role key in source (F1/E1).
-2. service_role / admin client used where user input flows in, or imported into client code (E2).
-3. Unsanitized PostgREST `.or()` / `.filter()` template-literal interpolation of user input — esp. via admin client (E14). Fix: `quotePostgrestOrFilterValue`.
-4. **IDOR** — resource id taken from client input instead of the verified token (29.2.3/29.2.4). *(RC2 — historically missed.)*
-5. Missing CSRF protection on state-changing routes (29.3.2).
-6. Auth tokens in localStorage / XSS-exfiltratable (29.2.2).
-7. Raw HTML render / `dangerouslySetInnerHTML` of user/blog content (29.7.1 XSS).
-8. Error-detail / stack leakage to API clients (29.4.2).
-9. Fail-open auth (cron/secret check passes when env unset) (F2/D2).
-10. Account-linking by unverified email (Firebase `email_verified` not checked before linking).
+**Globs (filename-anywhere):** `**/*supabase*`, `**/*firebase*`, `**/*auth*`, `**/api-handlers/**`, `**/onboarding/**`, `middleware.ts`, `lib/api-key.*`, `lib/rate-limit.*`, `**/*csp*`, `**/*.env*`, `**/*Service.ts`, `**/cors*`, `**/AuthCallback*`, `**/BlogPost*`
+**Content signals:** `supabaseAdmin`, `service_role`, `.or(`, `.filter(`, `dangerouslySetInnerHTML`, `localStorage`, `searchParams.get`, `verifyIdToken`, `verifyFirebaseToken`, `req.body`, `select('*')`, `connect-src`, `Allow-Credentials`, `CRON_SECRET`, `createClient`, `XMLParser`, `DOMParser`
 
-## Cynic tuning
-Refute on: not reachable with attacker input; already sanitized upstream; out-of-scope (data-integrity, not security). Be strict on exploitability claims; demand the actual attacker path.
+## Static pre-pass hand-off (deterministic, NO agent call — see orchestrator/static-checks.md)
+S-CSP-EVAL, S-CSP-CONNECT, S-SELECT-STAR, S-CRON-SECRET-OPEN run as grep BEFORE this family. Their hits arrive as CONTEXT tagged `[deterministic]` — do NOT re-derive them; build on them (reachability/blast-radius nuance only).
 
-## Researcher tuning
-Tier-2/3 focus: PostgREST filter grammar, Firebase Auth guarantees (email uniqueness/verification), Supabase RLS semantics, relevant CVEs.
+## Seed checklist — coverage FLOOR (run every time; grows only via /35398)
+Known findings are a floor, not a cage. Do the floor, THEN the open-ended hunt. Status is current vs repo HEAD acaf775 (verified 2026-06-11). `[REG]` = regression-guard: confirm it has NOT reverted.
+
+| # | Check (anchor) | Where to look NOW | Status | Sev |
+|---|---|---|---|---|
+| 1 | Unsanitized PostgREST `.or()` via **service-role** client, raw template-literal interpolation of user input → injectable OR conditions → account takeover (E14) | `src/lib/supabase.ts:187` `saveUserToSupabase()` builds `.or(\`firebase_uid.eq.${data.uid},email.eq.${data.email}\`)` on `supabaseAdmin` (bypasses RLS); NO `postgrestQuote`/sanitize import. Sibling `api-handlers/job-autocomplete.js:66-72` WAS fixed (uses `quotePostgrestOrFilterValue` from `_lib/postgrestQuote.js`); THIS was not. Fix: route the uid/email through `quotePostgrestOrFilterValue`. | **OPEN** | **P0** |
+| 2 | Broken auth / mass-assignment: server trusts client `userId` with no token verify (29.2.4) | `api-handlers/onboarding/recruiter.js:8` destructures `userId` from `req.body`, writes as `user_id` at `:44`; same in `applicant.js:9,29`. NO `verifyFirebaseToken` import → any unauthenticated caller binds a profile to an arbitrary user_id. Contrast FIXED `api-handlers/user-profile.js:29,63` (verifies token, 403 on uid mismatch). | **OPEN** | **P0** |
+| 3 | Stored XSS via raw `dangerouslySetInnerHTML` of attacker-influenceable content (29.7.1) | `src/routes/BlogPost.tsx:650` renders `<article dangerouslySetInnerHTML={{__html: blogBodyHtmlWithAnchors}}>` from `post.content` (`:214`) via `formatBlogContentForDisplay` (`src/lib/stripHtml.ts:290`) + `injectBlogHeadingAnchors`. That path does paragraph-split/anchor/h1-demote only — it does NOT call `sanitizeJobDescriptionHtml` (that runs ONLY on the JOB path, `formatJobDescriptionForDisplay:310`). No DOMPurify/sanitize-html in repo. NOTE: `page.tsx:227` is JSON-LD schema, escaped — SAFE, do not flag. | **OPEN** | **P0** |
+| 4 | Auth token in localStorage, sourced from URL query (29.2.2) | `src/components/AuthCallback.tsx:11,21` reads `searchParams.get('token')` then `localStorage.setItem('token', token)`. XSS-exfiltratable (no httpOnly/Secure cookie) + leaks via Referer/logs/history. Compounds #3 (any XSS → full token theft). | **OPEN** | **P1** |
+| 5 | IDOR — resource id from client input instead of verified token (29.2.3) `[REG]` | FIXED on the wired route: `api-handlers/user-profile.js` verifies token (`:29`), scopes GET `.eq('firebase_uid', verifiedUid)` (`:39`), 403 on POST mismatch (`:63`). Guard: any handler that reverts to reading `uid`/`user_id` from `req.body`/`req.query` without the `verifiedUid` check is a regression. | FIXED | — |
+| 6 | CSP `connect-src` bare wildcard `https:`/`wss:` (E4) | `src/lib/csp.ts:36-53` `CONNECT_SRC_LIST` starts `'self'`,`'https:'`,`'wss:'` (`:38-39`) before specific Supabase/Firebase hosts → wildcards make later entries moot, permit exfil to any HTTPS/WSS, weaken the strict-dynamic posture. NOT gated by `isDev` → applies in prod. (Pre-pass S-CSP-CONNECT also flags — deterministic P1, never downgrade.) | **OPEN** | **P1** |
+| 7 | `select('*')` over-fetch via service-role / RLS-bypassing clients → column leak (E6) | `src/lib/adminService.ts:39`, `applicantService.ts:129/263/590/704`, `recruiterService.ts:36`, `advertiserService.ts:240/339/402/458`, `supabase.ts:236` (`getUserFromSupabase` fn def `:233`, on `supabaseAdmin`); also `api-handlers/user-profile.js:38` on the `users` table. Risks leaking sensitive cols (e.g. `password_hash`). NOTE: 5 `src/lib` files NOW — do NOT cite the stale "11 files". (Pre-pass S-SELECT-STAR also flags `src/lib/*Service.ts` — deterministic P1, never downgrade.) | **OPEN** | **P1** |
+| 8 | Missing CSRF / origin enforcement on state-changing routes (29.3.2) | No `csrf`/`X-CSRF`/origin guard in `middleware.ts` or any handler (grep = none). Privacy cookie `sameSite:'lax'` (`middleware.ts:57`), not `'strict'`. **Bounded** because auth is Bearer header (`api-handlers/_lib/verifyFirebaseToken.js:3-19` extracts/verifies the `Authorization: Bearer` token; wired e.g. at `api-handlers/user-profile.js:2,29`), not cookie — BUT the unauthenticated onboarding routes (#2) and the broad CORS posture widen exposure: `api-handlers/_lib/cors.js` reflects Origin for joblet.ai + a Vercel-preview regex `/^https:\/\/[\w-]+-[\w-]+\.vercel\.app$/` with `Allow-Credentials:true` — any preview-shaped origin is trusted. | **OPEN** | **P2** |
+| 9 | Fail-open auth (cron/secret check passing when env unset) (F2/D2) | Covered by pre-pass S-CRON-SECRET-OPEN; in-family, confirm no auth/cron guard `return true` when its env (e.g. `CRON_SECRET`) is unset. Note `SEO_CRON_SECRET` NOT set in Vercel. | hunt | P0 |
+| 10 | Account-linking by **unverified** email (Firebase) | Confirm `email_verified` is checked before linking by email. #1's `.or(... email.eq ...)` links accounts by email with no verification gate — call out when present. | hunt | P0/P1 |
+| 11 | Hardcoded secret / service_role JWT in source (F1/E1) `[REG]` | FIXED/rotated; E2 (service_role in frontend) FIXED. Guard: any new hardcoded key, or service_role imported into client code, is a P0 regression. | FIXED | — |
+| 12 | Prod API-key gate + rate limit (A1/F3) `[REG]` | `middleware.ts:175-192` enforces `isApiKeyValid` on `/api/*` (except `/api/health`,`/api/csp-report`); `:195-223` per-IP `rateLimit()`. **Per-edge-isolate, in-memory, 60/min API + 120/min pages is CORRECT BY DESIGN (bot defense) — do NOT flag per-isolate scoping or the 60s timeout.** ONLY watch item: `API_RATE_LIMIT`/`PAGE_RATE_LIMIT` env override (`middleware.ts:22-23`) left over-wide in prod (e.g. a staging `100000`). | FIXED | — |
+| 13 | CSP nonce+strict-dynamic in prod, no `unsafe-eval`/`unsafe-inline` (E3) `[REG]` | `src/lib/csp.ts:55-62`: prod `script-src='self' 'nonce-${nonce}' 'strict-dynamic' ${SCRIPT_HOSTS}`; eval/inline only when `isDev` (`:56,60-62`). Nonce per-request via `crypto.getRandomValues` (`middleware.ts:8-14,273-280`). Guard: any `unsafe-eval`/`unsafe-inline` in the NON-dev branch is a P1 regression (pre-pass S-CSP-EVAL → P0). | FIXED | — |
+| 14 | Sanitizer-coverage caveats (regex stripping is incomplete) | (a) `sanitizeJobDescriptionHtml` (`src/lib/stripHtml.ts:66`) is REGEX-based: strips `<script>`/`<style>`/`style=` but NOT event handlers (`onerror=`/`onload=`), `javascript:` URIs, or `<svg>`/`<iframe>`; it is also NOT applied to the blog body at all (#3). (b) No DOMPurify/sanitize-html dependency anywhere. Flag any new raw-HTML render that relies on this regex path. | hunt | P0/P1 |
+
+## Open-ended HUNT pass (recall-graded — the audit MISSED these classes)
+Beyond the floor, actively hunt the false-negative families the original audit missed: **XXE** (`XMLParser`/`DOMParser`/`libxml` on ingest XML with external-entity expansion enabled, e.g. XML feed ingest — 29.8.5); **IDOR** beyond user-profile (any handler reading id from body/query); **CSRF** on any future cookie-trusting route; **stored/reflected XSS** on any `dangerouslySetInnerHTML` / `innerHTML` not on the sanitized job path; **token/secret in client storage or URL**; **mass-assignment** (spreading `req.body` into an insert/update); **open redirect** from `searchParams`. Severity: default PESSIMISTIC when blast radius is ambiguous — round UP (RC4).
+
+## Cynic tuning (artifact-scope rule is MANDATORY — RC8/lesson 2)
+Judge each finding ONLY against the PROVIDED diff/snippet. NEVER refute an in-diff fact by repo-absence (a buggy Cynic once refuted a real P0 hardcoded secret because the wider repo lacked Stripe; recall 1.00→0.57). Reading the repo for CONTEXT may only ADD nuance (reachability, upstream sanitization, Bearer-not-cookie mitigation), never ERASE an in-diff defect.
+- `refuted` only with the concrete reason: not reachable with attacker input / already sanitized upstream (name the sanitizer + line) / out-of-scope (data-integrity not security — hand to `database`).
+- `downgrade` when real but over-rated → `severity_if_changed` MUST be set (e.g. CSRF #8 downgraded from P1 to P2 because auth is Bearer-header, NOT cookie — but keep the onboarding/CORS caveat).
+- `needs-research` ONLY when the deciding factor is an external/repo fact (PostgREST `.or()` grammar, Firebase `email_verified` guarantee, XML parser default entity-expansion) — that and only that triggers the Researcher.
+- Do NOT refute #12's per-isolate rate limiter or the 60/min limit / 60s timeout — they are correct-by-design (load-test calibrated).
+
+## Researcher tuning (fires only on needs-research or novelty; every claim source-tagged)
+Tier order: `our-code` → `canonical-docs` (PostgREST filter/operator grammar, Supabase RLS + service_role semantics, Firebase Auth `email_verified`/uniqueness, OWASP XSS/CSRF/XXE) → `current-practice` (CVEs, sanitizer bypass corpora) → `frontier`. No CI: the Researcher CANNOT run exploits/load tests on prod — any perf-adjacent claim is tagged `"estimate — verify in staging"`. Resolve the canonical `.or()` injection mechanics for #1, the regex-sanitizer bypass set for #14, and XML default external-entity behavior for the XXE hunt.
+
+## Lessons → quarantine only (Analyser; /Joblet-review cannot promote)
+Propose `knowledge`/`regression` lessons to `.joblet-audit/quarantine.jsonl` (`status:"quarantined"`). A behavior/source fix (e.g. changing the Cynic's scope rule) is NOT proposable here → `requires:"/456098"`. Promotion via `/35398` only after the paired regression case flips FAIL→PASS.

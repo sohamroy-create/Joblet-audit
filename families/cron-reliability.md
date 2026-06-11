@@ -1,22 +1,54 @@
-# Family: CRON, SELF-HEALING & RELIABILITY
+# Family: cron-reliability
 
-**Lens:** cron handlers, self-healing workers, scheduler correctness, operational safety. **Roles:** substitute `{{FAMILY}}=cron-reliability`.
-**Glob triggers:** `**/selfheal/**`, `**/self-healing/**`, `vercel.json`, `**/workers/**`, `**/cron*`, `**/runLog*`
-**Content signals:** `cron`, `CRON_SECRET`, `is_active`, `serviceProbe`, `schedule`, `deactivat`, `missingFromFeed`
+**Token:** `cron-reliability` (finding ids `cron-N`). **Roles:** substitute `{{FAMILY}}=cron-reliability`.
+**Scope (one line):** cron handlers, self-healing workers, scheduler correctness, operational safety — health probe treating 4xx as healthy, missing circuit breaker/backpressure, run-logger losing records, no alert on cron failure, scheduler races/duplicate schedules, destructive worker without a kill-switch, missing TTL/cutoff, `.limit()` without `ORDER BY`, fail-open cron auth.
 
-## Seed checklist (coverage floor — grows via /35398)
-1. **Health probe treats 4xx as healthy** — `status >= 200 && status < 500` counts 401/403/404 as "ok" (D14, still OPEN in repo). Fix: only 2xx (and explicitly-allowed 3xx) are healthy.
-2. **No circuit breaker / backpressure** on a probe or worker that calls a flaky dependency (D8/D20).
-3. **Run-logger loses the run record on insert failure** → silent failures, no observability (D16).
-4. **No alert on cron failure** — a worker that can 100%-fail with nobody notified (D5).
-5. **Scheduler race / duplicate schedules** — overlapping cron entries or a second scheduler (pg_cron/Edge/Action) doing the same work (B23 / BLOCKING-5).
-6. **Destructive worker without a kill-switch** — mass `is_active=false` / deactivation with no `SELF_HEAL_*_DISABLE` guard (D15/B18).
-7. **TTL too long / cutoff missing** — expiry/staleness with no age predicate (D10) — overlaps Database.
-8. **`.limit()` with no `ORDER BY`** in a worker query → no fairness/progress (D17) — overlaps Database.
-9. **Fail-open auth** — cron secret check that passes when the env var is unset (F2/D2).
+**Globs (filename-anywhere):** `**/selfheal/**`, `**/self-healing/**`, `**/vercel.json`, `**/workers/**`, `**/*cron*`, `**/*runLog*`, `**/*scheduler*`, `**/seo/**`
+**Content signals:** `cron`, `CRON_SECRET`, `SEO_CRON_SECRET`, `x-vercel-cron`, `is_active`, `serviceProbe`, `consecutive_failures`, `startRun`, `finishRun`, `deactivat`, `missingFromFeed`, `expireNow`, `maxDuration`, `state.running`
 
-## Cynic tuning
-Refute on: the worker is read-only (no destructive write); a kill-switch exists elsewhere; the schedule overlap is intentional/idempotent. Watch items that are really Database (kick them over).
+> Wakes on glob OR content-signal (§3.1). Over-waking is safe. Items that are pure DB read/write correctness (e.g. `count:'exact'`, un-awaited writes) belong to **database**; cron-reliability owns the *operational/scheduling/destructive-safety* angle. The fail-open SEO cron auth overlaps **security** — raise it, let the Orchestrator dedup by scope (§Step 6).
 
-## Researcher tuning
-Tier-2 focus: Vercel cron semantics + `CRON_SECRET` header model, idempotency of repeated worker runs, what a 4xx vs 5xx actually means for the probed dependency. Confirm kill-switch env-var names against the repo (`our-code` tier).
+---
+
+## CHECKLIST PASS (coverage floor — never skipped; grows only via /35398)
+
+Each row is grounded in a current `file:line` in `/tmp/joblet-src`. Verified 2026-06-11. This is a FLOOR, not a cage — do the open-ended hunt after.
+
+| # | Check | Where it bites (current repo) | Sev | Status |
+|---|---|---|---|---|
+| 1 | **serviceProbe treats 4xx as healthy (fail-open health)** | `scripts/self-healing/workers/serviceProbe.js:37` `const ok = res.status >= 200 && res.status < 500;` — 401/403/404/429 from the title-expansion / JD-optimiser deps reads `ok=true`, resets `consecutive_failures` to 0 (line 85), sets `last_ok_at`. A blocked/auth-broken dependency shows GREEN. | P1 | D14 OPEN |
+| 2 | **No circuit breaker / backpressure** on probe or worker hitting a flaky dependency | serviceProbe just records status and upserts; no consecutive-failure threshold trips an open-circuit / stops calling. No exponential backoff. There is no circuit breaker anywhere in `scripts/self-healing/workers/*`. | P2 | structural |
+| 3 | **runLog silently loses the run record** | `scripts/self-healing/lib/runLog.js:16` `finishRun` does `if (!runId) return;`. If `startRun`'s `restInsert` returned empty/non-returning, `runId` is undefined → the run does real DB deactivation work but writes NO `finished_at`/`ok`/`processed_count` row and emits NO warning. Observability hole. | **P1** | D16 PARTIAL (guarded, silent loss remains) |
+| 4 | **No alert on cron failure** | No worker raises an alert/page/notification on 100% failure or on a swallowed `runId`. A cron can fail every tick with nobody notified (pairs with #3). | **P0** | D5 |
+| 5 | **Scheduler race / self-collision on serverless** | Daemon `scripts/self-healing/scheduler.js:48-49` guards re-entrancy via `state.running` Set + `runWorkerSafe` never throws. Production runs via Vercel crons → `app/api/selfheal/<name>/route.js` → `require('../../../../api-handlers/selfheal/<name>.js')` → `runNodeApiHandler` → `runWorker` (`api-handlers/selfheal/_utils.js:25`), which has **no** overlap/lock. A run exceeding its (un-set) `maxDuration` can collide with its own next `*/10` tick → two invocations probe/deactivate overlapping unordered batches. Offset regional schedules (us `*/10`, eu `2-59/10`, apac `4-59/10`, all `6-59/10`, service-probe `5-59/10`) space siblings but do not stop self-collision. | **P1** | B23 |
+| 6 | **Destructive worker w/o kill-switch — and the switch is OFF in prod** | `scripts/self-healing/workers/missingFromFeed.js:14` reads `SELF_HEAL_MISSING_DISABLE_DEACTIVATION === 'true'`; line 101 gates `is_active:false` on it. Per Vercel env this var is **NOT set** → deactivation is LIVE. Worker can deactivate `batchSize=1000` × `loopLimit=25` any job whose `last_seen_in_feed < cutoff`. A bad/partial feed ingest that drops `last_seen_in_feed` updates → mass-deactivation (data-loss/outage class). The `repairIncorrectlyDeactivated` path only un-deactivates rows where `last_seen_in_feed IS NULL`, not stale-but-non-null ones. | **P0** | D15 PARTIAL (switch wired, OFF) |
+| 6b | **expiredJobs has NO kill-switch at all** | `scripts/self-healing/workers/expiredJobs.js:50-75` `expireNow` queries `&is_active=eq.true&job_expires_at=lt.now&limit=${cfg.expireBatch}` (default 1000) then upserts `is_active:false`/`inactive_reason:'expired'`. grep confirms NO disable/kill flag (unlike missingFromFeed). `backfillExpiresAt` computes `job_expires_at = date||createdAt||updatedAt + ttlDays(45)` — a bad date column → premature expiry with no off-switch. | P2 | new |
+| 7 | **`.limit()` with NO `ORDER BY` on a large table** | `scripts/self-healing/workers/applyLinkChecker.js:102-107` `buildCandidateQuery` returns `${base}&or=${or}&limit=${poolSize}` with **no `order=`** (`poolSize` up to 2000). PostgREST returns physical/arbitrary order → a stale apply-link that never lands in the unordered window is never re-probed → starvation. No `order=` anywhere in `scripts/self-healing/workers/*` (grep). **`.limit()` with no `ORDER BY` on a large table is P1, not P2** (§5.2, regression `db-reg-1`). | **P1** | D17 OPEN |
+| 7b | **Same D17 class, more instances** | `missingFromFeed.js:30-34` (repair loop) & `:86-89` (deactivate loop) both `...&limit=${cfg.batchSize}` no `order=`; `expiredJobs.js:53-56` same. Loops break on a 0-row fetch but progress is incidental (each PATCH removes rows from the `is_active` set), not a stable `ORDER BY id` keyset — under churn the window can return overlapping/never-converging pages. | P1 | D17 class |
+| 8 | **TTL too long / cutoff missing** | expiredJobs `ttlDays` default 45 and missingFromFeed `missingDays` default 3 ARE present — flag only if a changed diff removes/loosens the age predicate. Overlaps **database**. | P2 | guard |
+| 9 | **Fail-open / unauthenticated cron auth** | `api-handlers/seo/index-jobs.js`: `isAuthorized()` (line 7) returns `true` on the spoofable `x-vercel-cron==='1'` header (line 9) AND `if (!secret) return true;` (line 11) — and `url-inspection-sample.js:7-10` has the same shape. `SEO_CRON_SECRET` is NOT set in prod, so both LIVE crons accept any caller. `api-handlers/seo/search-console-daily.js` (handler at line 20) has **zero** auth check at all — any public GET triggers a Search Console pull + DB `insertSafe`. Both registered at `vercel.json:90-99`. Fail-open auth (cron secret check passing when env unset) = **P0** (§5.2; corpus `CRON-FAILOPEN`=P0). | **P0** | OPEN (fail-open class) |
+| 10 | **Cron route missing `maxDuration` → truncated destructive run** | `vercel.json` `functions{}` sets `maxDuration` only for the 3 regional apply-link-checkers (lines 25-36). The plain `/api/selfheal/apply-link-checker` (`vercel.json:57-60`) has NO entry → default budget, yet `applyLinkChecker.js:15` `defaultBatch` for region `all` is 200 and the worker's own comment (lines 11-14) warns "a 200-job batch can exceed 60s and get killed before finishRun." service-probe / missing-from-feed / expired-jobs / company-logo-checker crons (lines 62-76) likewise have no `maxDuration`. Truncated run = partial deactivation + lost runLog finish (ties #3). | P2 | new |
+| 11 | **Timeout-fallback degrades bulk upsert into per-row PATCH that blows the budget** | `applyLinkChecker.js:282-297`: on a `57014` statement-timeout from `restUpsert` it falls into a serial `for (const patch of updates) await restPatchById(...)` with `perItemDelayMs` (50ms) between each. For a 200-row batch that is ~200 sequential round-trips + 10s of sleeps inside an invocation that has no `maxDuration` (#10) → mid-fallback function kill → partial deactivation + unfinished runLog (#3). | P2 | new |
+| 12 | **Worker writes to the WRONG Supabase project (broad key fallback)** | `companyLogoChecker.js:20-36` `getCompaniesDbConfig` resolves URL/key via `SELF_HEAL_COMPANIES_* \|\| BLOG_SUPABASE_* \|\| VITE_BLOG_SUPABASE_* \|\| SUPABASE_*`. Per env, `BLOG_SUPABASE_*` and `SUPABASE_SERVICE_ROLE_KEY` are both present (many duplicate service-role keys, 29.2.6). If `SELF_HEAL_COMPANIES_*` is unset, it writes `logo_url:null` on a 404 (lines 195-197) to whichever project the chain picks — no assertion URL and key belong to the same project. Cron at `vercel.json:73-76`. | P2 | new |
+
+> **DO NOT flag (verified safe / load-test ground truth):**
+> - `api-handlers/_lib/cronAuth.js:39-55 assertCronAuthorized` is correctly **FAIL-CLOSED**: no secret + `NODE_ENV==='production'` → `{ok:false}` (lines 42-44); insecure bypass requires explicit `ALLOW_CRON_WITHOUT_SECRET==='true'` AND non-prod. Accepts Bearer `CRON_SECRET` (Vercel format). `CRON_SECRET` is set in env. The selfheal routes enforce this — this is the correct pattern; do NOT regress it into a false positive. The OPEN fail-open finding (#9) is the SEO handlers, which do NOT use cronAuth.
+> - The per-edge-isolate, in-memory rate limiter (60 req/min/IP API, 120/min pages) is **correct by design** (intended bot defense); the 60s function timeout and Supabase tier are load-test-sanctioned. Do not flag these as defects.
+
+## OPEN-ENDED HUNT PASS (recall-graded; checklist is the floor, not the ceiling)
+
+The TEAM-CAUGHT false-negative style here is **auth that trusts a client header or defaults to allow** — exactly the SEO-cron fail-open (#9). Hunt for that shape beyond the listed instances. Also look for:
+- A new worker doing `is_active:false` / destructive PATCH with no `SELF_HEAL_*_DISABLE` env guard (the expiredJobs gap, #6b).
+- Any new `&limit=` worker query with no `&order=` (#7 class) — large table = P1.
+- A new cron in `vercel.json` with no `maxDuration` whose worker batch could exceed the default budget (#10).
+- A probe/healthcheck whose "ok" predicate admits 4xx, or any boolean that maps a degraded dependency to GREEN (#1 shape).
+- A serverless cron handler relying on a daemon-only re-entrancy guard (`state.running`) that does not exist on the Vercel path (#5).
+
+## Cynic tuning (artifact-scope rule, §5.2)
+
+Judge each finding against the PROVIDED diff/snippet — never refute an in-diff fact by repo-absence. Reading the repo for CONTEXT may only ADD nuance (reachability, an existing mitigation), never erase an in-diff defect.
+**Refute / downgrade when:** the worker is genuinely read-only (no destructive write reachable); a real kill-switch exists AND is set in the cited env; the schedule overlap is provably idempotent; the query already carries `order=`; the cited handler actually routes through `cronAuth.js` (fail-closed). Kick pure DB read/write-correctness items to **database**. `needs-research` only when the deciding fact is external (e.g. exact Vercel cron header trust model, PostgREST physical-order guarantee).
+
+## Researcher tuning (fires only on Cynic `needs-research` or novelty)
+
+Tiers: `our-code` → `canonical-docs` (Vercel cron / `CRON_SECRET` header model; PostgREST `limit`/`order` ordering guarantees; Supabase upsert `onConflict`) → `current-practice` → `frontier`. Confirm kill-switch env-var names against the repo (`our-code`). **No CI:** the timeout-kill risk for the unbounded crons (#10/#11) is ESTIMATED from the worker's own batch sizing + Vercel default budget — tag `"estimate — verify in staging"`; do not assert as measured. The §5 load-test numbers are the only MEASURED exception and are not this family's bottleneck (search ILIKE is — that's the search/middleware families).

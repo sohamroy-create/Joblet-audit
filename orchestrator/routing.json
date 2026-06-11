@@ -1,44 +1,63 @@
 {
-  "_comment": "Diff file paths are matched against each family's globs (first-match wins, but a file may wake multiple families). The generalist family ALWAYS wakes when a changed/deleted file matches no family, or when routing is uncertain. Orchestrator dedups overlapping findings post-hoc.",
+  "_comment": "Wake rule (SPEC 3.1): a family wakes if EITHER a changed file path matches one of its globs OR the diff CONTENT contains one of its content_signals. Content-signal matching is MANDATORY: path globs alone miss security/data bugs in generically-named files (e.g. src/lib/userSync.ts) — lesson 1. Multiple families may wake on one file; the Orchestrator dedups post-hoc (Step 6). Over-waking is safe; under-waking is not. The generalist family ALWAYS also wakes when a changed/deleted file matches no family, when the diff deletes code, or when routing is uncertain. The deterministic static pre-pass (orchestrator/static-checks.md) runs BEFORE families fan out and does NOT consume an agent call.",
+  "_globs_note": "Use filename-anywhere globs (**/*ingest*) NOT folder-only (**/ingest*/**) — VALIDATED 2026-06-11 against /tmp/joblet-src: root-level ingest-*.js scripts exist (ingest-joveo-partner.js, ingest-joveo-v2.js, ingest-xml-feeds.js, direct-ingest.js, retry-organic-feed.js, etc.) and folder-only globs were missing them. All globs below were validated against the real tree: src/lib/supabase.ts (E14), src/lib/csp.ts (E4), src/lib/*Service.ts (E6, 5+ files), api-handlers/_lib/postgrestQuote.js, scripts/self-healing/workers/{serviceProbe,applyLinkChecker}.js (D14/D17), lib/rate-limit.ts, middleware.ts, vercel.json, app/api/cron, app/api/selfheal all resolve. Canonical table = jobs_joveo_partner_v2; api/*.js renamed to api-handlers/*.js.",
   "families": {
     "security": {
-      "globs": ["**/api*/**", "**/auth*/**", "**/*.env*", "middleware.ts", "**/*supabase*", "**/*firebase*", "lib/api-key.*", "**/csp*"],
-      "content_signals": ["supabaseAdmin", "service_role", "verifyIdToken", ".or(", "localStorage", "dangerouslySetInnerHTML", "createClient"]
+      "_scope": "secrets, auth, authorization, injection, data exposure (hardcoded keys, admin client + user input, unsanitized .or()/.filter(), IDOR, CSRF, XSS, fail-open auth, token-in-localStorage, unverified-email account linking)",
+      "globs": ["**/*api*", "**/api-handlers/**", "**/*auth*", "**/*.env*", "**/middleware.ts", "**/*supabase*", "**/*firebase*", "**/*api-key*", "**/*csp*", "**/*onboard*", "**/*user-profile*", "**/*userSync*"],
+      "content_signals": ["supabaseAdmin", "service_role", "SERVICE_ROLE", "verifyIdToken", ".or(", ".filter(", "localStorage", "dangerouslySetInnerHTML", "createClient", "CRON_SECRET", "userId", "uid"]
     },
     "database": {
-      "_globs_note": "use filename-anywhere globs (**/*ingest*) not folder-only (**/ingest*/**) — validated 2026-06-11 against joblet1.0: root-level ingest-*.js scripts exist and were being missed",
-      "globs": ["**/*ingest*", "**/*sync*", "**/*.sql", "api-handlers/**", "**/_lib/**", "**/*bulk*"],
-      "content_signals": [".from(", ".insert(", ".update(", ".upsert(", ".delete(", "count: 'exact'", ".limit("]
+      "_scope": "correctness/idempotency/safety of DB reads & writes (wrong/legacy table vs jobs_joveo_partner_v2, non-idempotent inserts, mass destructive writes without staleness/kill-switch, .limit() with no ORDER BY = P1, fire-and-forget un-awaited writes, count:'exact' on hot path, unchecked {data,error}, SELECT-then-INSERT races)",
+      "globs": ["**/*ingest*", "**/*sync*", "**/*.sql", "**/api-handlers/**", "**/_lib/**", "**/*bulk*", "**/*Service.ts", "**/*migrate*"],
+      "content_signals": [".from(", ".insert(", ".update(", ".upsert(", ".delete(", "count: 'exact'", "count:'exact'", ".limit(", "jobs_joveo_partner_v2", "JOBS_TABLE_NAME", "randomUUID", "random-id"]
     },
     "search": {
-      "globs": ["**/search/**", "**/*autocomplete*", "**/*suggest*", "**/job-autocomplete*"],
-      "content_signals": [".textSearch(", ".ilike(", ".or(", "diversify", "rank"]
+      "_scope": "search/autocomplete/suggestion correctness and relevance (ilike '%term%' ignoring FTS/trigram index, client-side ranking, ranking-destroying post-processing like diversifyByCompany after DB rank, unsanitized .or() in suggestions, duplicate endpoints, unjustified ranking-formula changes)",
+      "globs": ["**/*search*", "**/*autocomplete*", "**/*suggest*", "**/*job-autocomplete*", "**/*location-autocomplete*", "**/*blog-autocomplete*"],
+      "content_signals": [".textSearch(", ".ilike(", "ilike", "%term%", ".or(", "pg_trgm", "diversify", "diversifyByCompany", "rank", "relevance"]
     },
     "frontend-seo-aeo": {
-      "globs": ["app/**", "components/**", "src/components/**", "**/*.tsx", "next.config.*", "**/robots*", "**/sitemap*", "**/csp*", "src/lib/*Service.ts"],
-      "content_signals": ["canonical", "noindex", "JsonLd", "useEffect", "select('*')", "metadata"]
+      "_scope": "SEO/AEO correctness + frontend logic hygiene (D1/D2 split). SEO is DETERMINISTIC and handled by the static pre-pass (orchestrator/static-checks.md: S-CANON, S-ROBOTS, S-SITEMAP-SLASH, S-NOINDEX), NOT the agent loop. The agent loop owns frontend logic (CSP regressions, select('*') over-fetch, useEffect without AbortController/cleanup) and AEO readiness.",
+      "globs": ["app/**", "components/**", "src/components/**", "**/*.tsx", "**/next.config.*", "**/*robots*", "**/*sitemap*", "**/*csp*", "**/*Service.ts", "src/lib/*Service.ts"],
+      "content_signals": ["canonical", "noindex", "JsonLd", "useEffect", "AbortController", "select('*')", "metadata", "connect-src", "script-src", "unsafe-eval", "unsafe-inline"]
     },
     "middleware-scalability": {
-      "globs": ["middleware.ts", "**/middleware/**", "**/rate-limit*", "vercel.json", "lib/db*", "**/*pool*", "**/*cache*"],
-      "content_signals": ["new Map(", "Cache-Control", "rateLimit", "pool", "Supavisor"]
+      "_scope": "middleware, caching, connection pooling, frontend<->backend scalability (per-isolate Map rate-limiter/cache semantics, pool contention between cron/ingest/live traffic, missing backpressure, Cache-Control on SSR, missing request timeout/size limit). Thresholds MEASURED from the load test (see _measured_facts) — no longer a stub. The rate limiter is CORRECT BY DESIGN: do NOT flag per-isolate rate limiting as a defect; the defect class is MISSING or OVER-WIDE limits.",
+      "globs": ["**/middleware.ts", "**/middleware/**", "**/*rate-limit*", "**/vercel.json", "**/*db*", "**/*pool*", "**/*cache*", "**/*supavisor*"],
+      "content_signals": ["new Map(", "Cache-Control", "rateLimit", "rate-limit", "pool", "Supavisor", "maxDuration", "revalidate"]
     },
     "cron-reliability": {
-      "globs": ["**/selfheal/**", "**/self-healing/**", "vercel.json", "**/workers/**", "**/cron*", "**/runLog*"],
-      "content_signals": ["cron", "CRON_SECRET", "is_active", "serviceProbe", "schedule"]
+      "_scope": "cron handlers, self-healing workers, scheduler correctness, operational safety (health probe treating 4xx as healthy, missing circuit breaker/backpressure, run-logger losing records, no alert on cron failure, scheduler races/duplicate schedules, destructive worker without kill-switch, missing TTL/cutoff, .limit() without ORDER BY = P1, fail-open cron auth = P0)",
+      "globs": ["**/*selfheal*", "**/self-healing/**", "**/vercel.json", "**/workers/**", "**/*cron*", "**/*runLog*", "**/*serviceProbe*", "**/*applyLinkChecker*", "**/*scheduler*"],
+      "content_signals": ["cron", "CRON_SECRET", "SEO_CRON_SECRET", "is_active", "serviceProbe", "schedule", "status >= 200", "circuit", "kill-switch", "SELF_HEAL_MISSING_DISABLE_DEACTIVATION"]
     },
     "generalist": {
+      "_scope": "fallback recall safety-net; no static checklist, pure open-ended hunt. Wakes on unclaimed files, deletions, or routing uncertainty so no PR passes with zero families awake.",
       "globs": ["**/*"],
       "is_fallback": true,
-      "_comment": "Wakes on: unclaimed files, code deletions, or any routing uncertainty. Recall-first; no static checklist — pure open-ended hunt."
+      "_comment": "ALWAYS also wakes when: a changed/deleted file matches NO other family, OR the diff deletes code, OR routing is uncertain ('when unsure, wake everything'). Recall-first; NO static checklist — pure open-ended hunt. Guarantee: no PR ever passes with zero families awake."
     }
   },
   "run_modes": {
-    "fast": {"roles": ["checker", "cynic"], "researcher": "on-demand-only", "default_for": "/Joblet-review"},
+    "fast": {"roles": ["checker", "cynic"], "researcher": "on-demand-only", "default_for": "/Joblet-review", "_note": "Researcher fires ONLY on Cynic needs-research or diff novelty"},
     "deep": {"roles": ["checker", "cynic", "researcher"], "researcher": "always"}
   },
   "limits": {
     "per_run_wallclock_seconds": 360,
-    "on_timeout": "drop finding to needs-human, continue, note visibly in report",
+    "on_timeout": "drop finding to needs-human, continue, note visibly in report — never block the whole report on one hung agent, never drop silently",
     "max_parallel_families": 6
+  },
+  "_measured_facts": {
+    "_source": "staging load test 2026-06-11 — MEASURED, may be cited as such; all OTHER perf claims the Researcher makes must be tagged 'estimate — verify in staging'",
+    "db_sustain_req_per_sec": 40,
+    "search_p95_current": "~60s (ILIKE '%term%' substring -> sequential scan -> hits Vercel 60s function timeout) — THE bottleneck, confirms C15/A20/C18",
+    "search_p95_budget": "300ms (MEASURED breach)",
+    "autocomplete_p95_current": "~2.5s (breaches <100ms budget; functional but slow)",
+    "autocomplete_p95_budget": "100ms (MEASURED breach)",
+    "page_lcp_budget": "1.5s (ESTIMATED unless a measured number is cited)",
+    "recommended_fix": "3 pg_trgm GIN indexes on jobs_joveo_partner_v2 (title, description, company) -> expected search p95 60s -> <1s (MEASURED recommendation)",
+    "active_user_ceiling": "200-400 now -> 1,500-2,500 post-index; casual browsing 2,000+ -> 5,000+; error rate under stress 1.6% (mostly timeouts)",
+    "rate_limiter": "CORRECT BY DESIGN (60 req/min/IP API, 120/min pages, per-edge-isolate, in-memory). 87% 429 under single-source flood = intended bot defense, NOT a bug. Leave the 60/min limit, the 60s timeout, and the Supabase tier ALONE."
   }
 }
