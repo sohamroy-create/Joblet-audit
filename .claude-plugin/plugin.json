@@ -1,0 +1,8 @@
+{
+  "name": "joblet-audit",
+  "version": "1.0.0",
+  "description": "Joblet PR/code-review system. Multi-agent (Checker -> Cynic -> Researcher-on-demand) review of a git diff or pasted code/SQL/config against Joblet's own audit history + load-test-calibrated thresholds, with a deterministic static pre-pass. Read-only, no API key. Commands: /joblet-audit:Joblet-review (everyday), :34287 (weekly report), :35398/:46408 (approver-gated), :456098 (source-gated, Soham).",
+  "author": { "name": "sohamroy" },
+  "homepage": "https://github.com/sohamroy-create/Joblet-audit",
+  "repository": { "type": "git", "url": "https://github.com/sohamroy-create/Joblet-audit.git" }
+}

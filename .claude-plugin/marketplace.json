@@ -1,0 +1,11 @@
+{
+  "name": "joblet-audit",
+  "owner": { "name": "sohamroy" },
+  "plugins": [
+    {
+      "name": "joblet-audit",
+      "source": ".",
+      "description": "Joblet-Audit: multi-agent code-review skill + 5 commands, calibrated to Joblet's audit history and the 2026-06-11 load test."
+    }
+  ]
+}

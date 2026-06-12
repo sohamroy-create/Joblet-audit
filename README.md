@@ -1,29 +1,31 @@
-# joblet-audit — skill package (Phase 0 scaffold)
+# joblet-audit (Claude Code plugin)
 
-A distributable Claude Code skill that reviews code changes for the Joblet job-board against the project's own audit history, using a multi-agent family loop. No Claude API key needed — it runs inside each user's Claude Code.
+Multi-agent code-review system for the Joblet job-board, calibrated to the project's audit history + a staging load test. Runs read-only inside Claude Code / Cowork; no API key.
+
+## Install (Cowork or Claude Code)
+```
+/plugin marketplace add sohamroy-create/Joblet-audit
+/plugin install joblet-audit@joblet-audit
+/reload-plugins
+```
+(Cowork GUI: Customize → Plugins → Add marketplace → `sohamroy-create/Joblet-audit` → Install.)
+
+## Commands (namespaced by the plugin)
+| Command | Who | Purpose |
+|---|---|---|
+| `/joblet-audit:Joblet-review` | everyone, no key | review the current diff (or `--paste`); read-only; proposes lessons to quarantine |
+| `/joblet-audit:34287` | reviewers, no key | render the quarantine queue as a weekly `.docx` |
+| `/joblet-audit:35398` | Approver key | apply approved knowledge updates (regression-gated) |
+| `/joblet-audit:46408` | Approver key | rotate read-only Vercel/Supabase/GitHub tokens (15-day) |
+| `/joblet-audit:456098` | Source key (Soham) | change agent logic/source/behavior |
 
 ## Layout
-```
-joblet-audit-skill/
-  SKILL.md                 # orchestrator brain — how a review runs
-  commands/                # 5 entry points: Joblet-review, 34287, 35398, 46408, 456098
-  roles/                   # checker / cynic / researcher / analyser templates ({{FAMILY}}-parameterized)
-  families/                # per-family defs (globs + seed checklist + tuning); security+database full, rest stubbed
-  orchestrator/            # routing.json, output-contract.md, json-schemas.md
-  scripts/                 # extract-diff.sh, corpus-sync.sh
-.joblet-audit/             # SHARED CORPUS — ships to the TARGET repo, not the skill (syncs via git)
-  findings.jsonl, root-causes.md, lessons.jsonl, quarantine.jsonl, config.json, checklists/
-```
+- `.claude-plugin/` — `plugin.json` (manifest) + `marketplace.json` (listing)
+- `commands/` — the 5 slash commands (plugin root)
+- `skills/joblet-audit/` — the skill: `SKILL.md` (orchestrator brain), `roles/`, `families/`, `orchestrator/`, `knowledge/`, `scripts/`, and the seed `.joblet-audit/` corpus.
 
-## Install (intended)
-1. Distribute as a Claude Code **plugin** so the skill + the 5 commands install together and are namespaced (not loose global commands). 
-2. Copy `.joblet-audit/` into the target repo (`Joblet-Official/joblet1.0`) on the `joblet-audit-corpus` branch — this is the shared, version-controlled knowledge base.
-3. Approver/Source key hashes set during install via `/456098`. Read-only provider tokens go in each approver's LOCAL env.
+## First-run setup
+1. Set key hashes (key holders, locally): `skills/joblet-audit/KEY_SETUP.md`.
+2. The shared corpus syncs from the `joblet-audit-corpus` branch (`skills/joblet-audit/scripts/corpus-sync.sh`).
 
-## Status
-- **Phase 0 (this):** scaffold, corpus structure, role templates, orchestrator/routing, output contract, command surface. Security + Database families seeded; others stubbed.
-- **Phase 1 (next):** Family A end-to-end + the held-out false-negative eval set + the bake-off gate.
-- Mechanics proven in Phase −1 (`agent/spike/SPIKE_RESULTS.md`).
-
-## Known open flags
-See `agent/FLAG_LEDGER.md`.
+See `skills/joblet-audit/PRODUCT_DOCUMENTATION.md` for full scope/capabilities/structure.
